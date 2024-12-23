@@ -5,7 +5,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use futures::future;
 use gtk::{
     glib::{self, result_from_gboolean},
     prelude::*,
@@ -17,6 +16,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 const PIPE_PATH: &str = "/tmp/wayland-osd.pipe";
+
+// Embed SVG files
+const ICON_VOLUME_HIGH: &str = include_str!("../assets/sink-volume-high-symbolic.svg");
+const ICON_VOLUME_MEDIUM: &str = include_str!("../assets/sink-volume-medium-symbolic.svg");
+const ICON_VOLUME_LOW: &str = include_str!("../assets/sink-volume-low-symbolic.svg");
+const ICON_VOLUME_MUTED: &str = include_str!("../assets/sink-volume-muted-symbolic.svg");
+const ICON_VOLUME_OVERAMPLIFIED: &str =
+    include_str!("../assets/sink-volume-overamplified-symbolic.svg");
+const ICON_BRIGHTNESS: &str = include_str!("../assets/display-brightness-symbolic.svg");
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct OsdMessage {
@@ -36,27 +44,30 @@ struct UiElements {
     timeout_source_id: Arc<Mutex<Option<glib::SourceId>>>,
 }
 
-fn load_icon(name: &str) -> gtk::Image {
-    let path = format!("wayland-osd-server/assets/{}.svg", name);
-    gtk::Image::from_file(&path)
+fn load_icon_from_string(svg_data: &str) -> gtk::Image {
+    let bytes = glib::Bytes::from_owned(svg_data.as_bytes().to_vec());
+    let texture = gtk::gdk::Texture::from_bytes(&bytes).expect("Failed to load icon");
+    gtk::Image::from_paintable(Some(&texture))
 }
 
-fn get_volume_icon_name(value: i32, max_value: i32, muted: bool) -> &'static str {
+fn get_volume_icon(value: i32, max_value: i32, muted: bool) -> gtk::Image {
     if muted {
-        return "sink-volume-muted-symbolic";
+        return load_icon_from_string(ICON_VOLUME_MUTED);
     }
 
     let percentage = (value as f64 / max_value as f64) * 100.0;
 
-    if percentage > 100.0 {
-        "sink-volume-overamplified-symbolic"
+    let icon_data = if percentage > 100.0 {
+        ICON_VOLUME_OVERAMPLIFIED
     } else if percentage > 66.0 {
-        "sink-volume-high-symbolic"
+        ICON_VOLUME_HIGH
     } else if percentage > 33.0 {
-        "sink-volume-medium-symbolic"
+        ICON_VOLUME_MEDIUM
     } else {
-        "sink-volume-low-symbolic"
-    }
+        ICON_VOLUME_LOW
+    };
+
+    load_icon_from_string(icon_data)
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +150,7 @@ fn create_ui(app: &gtk::Application) -> UiElements {
         .spacing(10)
         .build();
 
-    let icon = load_icon("sink-volume-medium-symbolic");
+    let icon = load_icon_from_string(ICON_VOLUME_MEDIUM);
     icon.set_visible(false);
 
     let progress_bar = gtk::ProgressBar::new();
@@ -176,11 +187,10 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 ui.label.set_visible(false);
 
                 // Update icon based on volume level and muted state
-                let icon_name = get_volume_icon_name(value, max, msg.muted.unwrap_or(false));
-                ui.icon.set_from_file(Some(&format!(
-                    "wayland-osd-server/assets/{}.svg",
-                    icon_name
-                )));
+                let new_icon = get_volume_icon(value, max, msg.muted.unwrap_or(false));
+                if let Some(paintable) = new_icon.paintable() {
+                    ui.icon.set_paintable(Some(&paintable));
+                }
                 ui.icon.set_visible(true);
             }
         }
@@ -190,9 +200,10 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 ui.progress_bar.set_fraction(value as f64 / max as f64);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
-                ui.icon.set_from_file(Some(
-                    "wayland-osd-server/assets/display-brightness-symbolic.svg"
-                ));
+                let brightness_icon = load_icon_from_string(ICON_BRIGHTNESS);
+                if let Some(paintable) = brightness_icon.paintable() {
+                    ui.icon.set_paintable(Some(&paintable));
+                }
                 ui.icon.set_visible(true);
             }
         }
