@@ -1,5 +1,9 @@
 use futures::future;
-use gtk::{glib, prelude::*};
+use gtk::{
+    ffi,
+    glib::{self, ffi::g_source_remove, result_from_gboolean},
+    prelude::*,
+};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -19,6 +23,7 @@ struct UiElements {
     window: gtk::ApplicationWindow,
     progress_bar: gtk::ProgressBar,
     label: gtk::Label,
+    timeout_source_id: std::cell::RefCell<Option<glib::SourceId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +97,11 @@ fn setup_css() -> gtk::CssProvider {
     let css_data = "
         window {
             background-color: rgba(0, 0, 0, 0.8);
+            min-width: 200px;
+            width: 600px;
+            margin-start: 50%;
+            margin-end: 50%;
+            transform: translateX(-50%);
         }
         .osd-overlay {
             margin: 20px;
@@ -130,15 +140,11 @@ fn create_ui(app: &gtk::Application) -> UiElements {
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
 
-    // Anchor to top-center
-    window.set_anchor(Edge::Top, true);
-    window.set_anchor(Edge::Left, true);
-    window.set_anchor(Edge::Right, true);
+    // Anchor to bottom-center
+    window.set_anchor(Edge::Bottom, true);
 
     // Set margins
-    window.set_margin(Edge::Top, 50);
-    window.set_margin(Edge::Left, 0);
-    window.set_margin(Edge::Right, 0);
+    window.set_margin(Edge::Bottom, 50);
 
     // Set up CSS
     let provider = setup_css();
@@ -170,6 +176,7 @@ fn create_ui(app: &gtk::Application) -> UiElements {
         window,
         progress_bar,
         label,
+        timeout_source_id: std::cell::RefCell::new(None),
     }
 }
 
@@ -194,12 +201,31 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
 
     ui.window.set_visible(true);
 
-    // Schedule hide after 3 seconds
+    // Remove existing timeout if any
+    if let Some(source_id) = ui.timeout_source_id.borrow_mut().take() {
+        unsafe {
+            if let Err(err) = result_from_gboolean!(
+                glib::ffi::g_source_remove(source_id.as_raw()),
+                "Failed to remove source"
+            ) {
+                eprintln!(
+                    "Failed to remove source {}, it may have already been removed: {}",
+                    source_id.as_raw(),
+                    err.message
+                );
+            }
+        }
+    }
+
+    // Schedule new hide timeout after 3 seconds
     let window = ui.window.clone();
-    glib::timeout_add_seconds_local(3, move || {
+    let source_id = glib::timeout_add_seconds_local(3, move || {
         window.set_visible(false);
-        glib::ControlFlow::Continue
+        glib::ControlFlow::Break
     });
+
+    // Store the new timeout source ID
+    *ui.timeout_source_id.borrow_mut() = Some(source_id);
 }
 
 #[tokio::main]
