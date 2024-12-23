@@ -25,13 +25,38 @@ struct OsdMessage {
     value: Option<i32>,
     max_value: Option<i32>,
     text: Option<String>,
+    muted: Option<bool>,
 }
 
 struct UiElements {
     window: gtk::ApplicationWindow,
     progress_bar: gtk::ProgressBar,
     label: gtk::Label,
+    icon: gtk::Image,
     timeout_source_id: Arc<Mutex<Option<glib::SourceId>>>,
+}
+
+fn load_icon(name: &str) -> gtk::Image {
+    let path = format!("wayland-osd-server/assets/{}.svg", name);
+    gtk::Image::from_file(&path)
+}
+
+fn get_volume_icon_name(value: i32, max_value: i32, muted: bool) -> &'static str {
+    if muted {
+        return "sink-volume-muted-symbolic";
+    }
+
+    let percentage = (value as f64 / max_value as f64) * 100.0;
+
+    if percentage > 100.0 {
+        "sink-volume-overamplified-symbolic"
+    } else if percentage > 66.0 {
+        "sink-volume-high-symbolic"
+    } else if percentage > 33.0 {
+        "sink-volume-medium-symbolic"
+    } else {
+        "sink-volume-low-symbolic"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -108,13 +133,25 @@ fn create_ui(app: &gtk::Application) -> UiElements {
         .css_classes(vec!["osd-overlay"])
         .build();
 
+    // Create horizontal box for icon and progress bar
+    let hbox = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(10)
+        .build();
+
+    let icon = load_icon("sink-volume-medium-symbolic");
+    icon.set_visible(false);
+
     let progress_bar = gtk::ProgressBar::new();
     progress_bar.set_visible(false);
 
     let label = gtk::Label::new(None);
     label.set_visible(false);
 
-    overlay.append(&progress_bar);
+    hbox.append(&icon);
+    hbox.append(&progress_bar);
+
+    overlay.append(&hbox);
     overlay.append(&label);
     window.set_child(Some(&overlay));
 
@@ -124,18 +161,39 @@ fn create_ui(app: &gtk::Application) -> UiElements {
         window,
         progress_bar,
         label,
+        icon,
         timeout_source_id: Arc::new(Mutex::new(None)),
     }
 }
 
 fn handle_message(ui: &UiElements, msg: OsdMessage) {
     match msg.message_type.as_str() {
-        "volume" | "brightness" => {
+        "volume" => {
             if let (Some(value), Some(max)) = (msg.value, msg.max_value) {
                 println!("received message: {}", value);
                 ui.progress_bar.set_fraction(value as f64 / max as f64);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
+
+                // Update icon based on volume level and muted state
+                let icon_name = get_volume_icon_name(value, max, msg.muted.unwrap_or(false));
+                ui.icon.set_from_file(Some(&format!(
+                    "wayland-osd-server/assets/{}.svg",
+                    icon_name
+                )));
+                ui.icon.set_visible(true);
+            }
+        }
+        "brightness" => {
+            if let (Some(value), Some(max)) = (msg.value, msg.max_value) {
+                println!("received message: {}", value);
+                ui.progress_bar.set_fraction(value as f64 / max as f64);
+                ui.progress_bar.set_visible(true);
+                ui.label.set_visible(false);
+                ui.icon.set_from_file(Some(
+                    "wayland-osd-server/assets/display-brightness-symbolic.svg"
+                ));
+                ui.icon.set_visible(true);
             }
         }
         "text" => {
@@ -143,6 +201,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 ui.label.set_text(&text);
                 ui.label.set_visible(true);
                 ui.progress_bar.set_visible(false);
+                ui.icon.set_visible(false);
             }
         }
         _ => return,

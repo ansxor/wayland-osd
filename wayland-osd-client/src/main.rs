@@ -79,18 +79,12 @@ fn main() -> anyhow::Result<()> {
             max_volume,
             mute,
         } => {
-            let message = if mute {
-                json!({
-                    "type": "text",
-                    "text": "Audio Muted"
-                })
-            } else {
-                json!({
-                    "type": "volume",
-                    "value": volume,
-                    "max_value": max_volume
-                })
-            };
+            let message = json!({
+                "type": "volume",
+                "value": volume,
+                "max_value": max_volume,
+                "muted": mute
+            });
             client.send_message(&message.to_string())?;
         }
         Commands::Brightness { level, max_level } => {

@@ -74,14 +74,14 @@ fn get_volume_info() -> Result<(f32, bool)> {
 fn run_client(client_path: &str, volume_percent: u32, is_muted: bool) -> Result<()> {
     let mut cmd = Command::new(client_path);
 
+    debug!(
+        "Running client with volume: {}%, muted: {}",
+        volume_percent, is_muted
+    );
+
     if is_muted {
-        debug!(
-            "Running client with mute state, volume: {}%",
-            volume_percent
-        );
-        cmd.args(["audio", "--mute", &volume_percent.to_string()]);
+        cmd.args(["audio", &volume_percent.to_string(), "--mute"]);
     } else {
-        debug!("Running client with volume: {}%", volume_percent);
         cmd.args(["audio", &volume_percent.to_string()]);
     }
 
