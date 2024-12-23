@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::process::Command;
-use zbus::{Connection, dbus_proxy};
+use zbus::{dbus_proxy, Connection};
 
 #[dbus_proxy(
     interface = "org.wayland.Osd",
@@ -51,11 +51,6 @@ enum Commands {
         /// Message to display
         message: String,
     },
-    /// Run a backend script and show its output
-    Backend {
-        /// Name of the backend script to run
-        name: String,
-    },
 }
 
 struct OsdClient {
@@ -78,24 +73,6 @@ impl OsdClient {
             .show_message(message)
             .await
             .context("Failed to send message")?;
-        Ok(())
-    }
-
-    async fn run_backend(&self, name: &str) -> anyhow::Result<()> {
-        let script_path = format!("/usr/local/share/wayland-osd/backends/{}.sh", name);
-        let output = Command::new(&script_path)
-            .output()
-            .with_context(|| format!("Failed to execute backend script: {}", script_path))?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Backend script failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        let result = String::from_utf8_lossy(&output.stdout);
-        self.send_message(&result).await?;
         Ok(())
     }
 }
@@ -144,9 +121,6 @@ async fn main() -> anyhow::Result<()> {
                 "text": message
             });
             client.send_message(&message.to_string()).await?;
-        }
-        Commands::Backend { name } => {
-            client.run_backend(&name).await?;
         }
     }
 

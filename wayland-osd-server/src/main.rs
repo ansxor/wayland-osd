@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::Mutex;
+
 use futures::future;
 use gtk::{
     ffi,
@@ -6,7 +9,6 @@ use gtk::{
 };
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use zbus::{dbus_interface, Connection};
 
@@ -23,7 +25,7 @@ struct UiElements {
     window: gtk::ApplicationWindow,
     progress_bar: gtk::ProgressBar,
     label: gtk::Label,
-    timeout_source_id: std::cell::RefCell<Option<glib::SourceId>>,
+    timeout_source_id: Arc<Mutex<Option<glib::SourceId>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,7 +178,7 @@ fn create_ui(app: &gtk::Application) -> UiElements {
         window,
         progress_bar,
         label,
-        timeout_source_id: std::cell::RefCell::new(None),
+        timeout_source_id: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -184,6 +186,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
     match msg.message_type.as_str() {
         "volume" | "brightness" => {
             if let (Some(value), Some(max)) = (msg.value, msg.max_value) {
+                println!("received message: {}", value);
                 ui.progress_bar.set_fraction(value as f64 / max as f64);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
@@ -199,10 +202,8 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
         _ => return,
     }
 
-    ui.window.set_visible(true);
-
-    // Remove existing timeout if any
-    if let Some(source_id) = ui.timeout_source_id.borrow_mut().take() {
+    // RemovAe existing timeout if any
+    if let Some(source_id) = ui.timeout_source_id.lock().unwrap().take() {
         unsafe {
             if let Err(err) = result_from_gboolean!(
                 glib::ffi::g_source_remove(source_id.as_raw()),
@@ -217,15 +218,19 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
         }
     }
 
+    ui.window.set_visible(true);
+
     // Schedule new hide timeout after 3 seconds
     let window = ui.window.clone();
+    let timeout_source_id = ui.timeout_source_id.clone();
     let source_id = glib::timeout_add_seconds_local(3, move || {
         window.set_visible(false);
+        *timeout_source_id.lock().unwrap() = None;
         glib::ControlFlow::Break
     });
 
     // Store the new timeout source ID
-    *ui.timeout_source_id.borrow_mut() = Some(source_id);
+    *ui.timeout_source_id.lock().unwrap() = Some(source_id);
 }
 
 #[tokio::main]
