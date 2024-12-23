@@ -1,16 +1,22 @@
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, ErrorKind};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use futures::future;
 use gtk::{
-    ffi,
-    glib::{self, ffi::g_source_remove, result_from_gboolean},
+    glib::{self, result_from_gboolean},
     prelude::*,
 };
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
+use nix::libc;
+use nix::sys::stat;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use zbus::{dbus_interface, Connection};
+
+const PIPE_PATH: &str = "/tmp/wayland-osd.pipe";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct OsdMessage {
@@ -31,67 +37,6 @@ struct UiElements {
 #[derive(Debug, Clone)]
 struct OsdServer {
     sender: mpsc::UnboundedSender<OsdMessage>,
-}
-
-#[dbus_interface(name = "org.wayland.Osd")]
-impl OsdServer {
-    async fn show_message(&self, json_message: &str) -> zbus::fdo::Result<()> {
-        let msg: OsdMessage = serde_json::from_str(json_message)
-            .map_err(|e| zbus::fdo::Error::Failed(format!("Invalid JSON: {}", e)))?;
-
-        self.sender
-            .send(msg)
-            .map_err(|_| zbus::fdo::Error::Failed("Failed to send message".into()))?;
-
-        Ok(())
-    }
-
-    fn quit(&self) -> Result<(), zbus::fdo::Error> {
-        Ok(())
-        // Err(Error::NotSupported("Not implemented".to_string()))
-    }
-
-    fn raise(&self) -> Result<(), zbus::fdo::Error> {
-        Ok(())
-        // self.sender
-        //     .unbounded_send(AppAction::Raise)
-        //     .map_err(|_| Error::Failed("Could not send action".to_string()))
-    }
-
-    #[dbus_interface(property)]
-    fn can_quit(&self) -> bool {
-        false
-    }
-
-    #[dbus_interface(property)]
-    fn can_raise(&self) -> bool {
-        true
-    }
-
-    #[dbus_interface(property)]
-    fn has_track_list(&self) -> bool {
-        false
-    }
-
-    #[dbus_interface(property)]
-    fn identity(&self) -> &'static str {
-        "Spot"
-    }
-
-    #[dbus_interface(property)]
-    fn supported_mime_types(&self) -> Vec<String> {
-        vec![]
-    }
-
-    #[dbus_interface(property)]
-    fn supported_uri_schemes(&self) -> Vec<String> {
-        vec![]
-    }
-
-    #[dbus_interface(property)]
-    fn desktop_entry(&self) -> &'static str {
-        "dev.alextren.Spot"
-    }
 }
 
 fn setup_css() -> gtk::CssProvider {
@@ -130,6 +75,7 @@ fn setup_css() -> gtk::CssProvider {
     provider.load_from_data(css_data);
     provider
 }
+
 fn create_ui(app: &gtk::Application) -> UiElements {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -202,7 +148,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
         _ => return,
     }
 
-    // RemovAe existing timeout if any
+    // Remove existing timeout if any
     if let Some(source_id) = ui.timeout_source_id.lock().unwrap().take() {
         unsafe {
             if let Err(err) = result_from_gboolean!(
@@ -233,9 +179,27 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
     *ui.timeout_source_id.lock().unwrap() = Some(source_id);
 }
 
+fn setup_pipe() -> anyhow::Result<()> {
+    // Remove existing pipe if it exists
+    if Path::new(PIPE_PATH).exists() {
+        fs::remove_file(PIPE_PATH)?;
+    }
+
+    // Create new pipe with proper permissions
+    nix::unistd::mkfifo(
+        PIPE_PATH,
+        stat::Mode::S_IRUSR | stat::Mode::S_IWUSR | stat::Mode::S_IWGRP | stat::Mode::S_IWOTH,
+    )?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     gtk::init()?;
+
+    // Set up the named pipe
+    setup_pipe()?;
 
     let (sender, mut receiver) = mpsc::unbounded_channel::<OsdMessage>();
     let server = OsdServer { sender };
@@ -252,18 +216,38 @@ async fn main() -> anyhow::Result<()> {
         *ui_elements_clone.lock() = Some(ui);
     });
 
-    // let connection = ConnectionBuilder::session()?
-    //     .name("org.wayland.Osd")?
-    //     .serve_at("/org/wayland/Osd", server)?
-    //     .build()
-    //     .await?;
-
+    // Spawn pipe reading task
+    let server_clone = server.clone();
     tokio::spawn(async move {
-        let conn = Connection::session().await?;
-        conn.request_name("org.wayland.Osd").await?;
-        conn.object_server().at("/org/wayland/Osd", server).await?;
-        future::pending::<()>().await;
-        Ok::<_, anyhow::Error>(())
+        loop {
+            // Open the pipe for reading
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(PIPE_PATH)
+                .unwrap();
+
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                match line {
+                    Ok(message) => {
+                        if let Ok(msg) = serde_json::from_str::<OsdMessage>(&message) {
+                            if server_clone.sender.send(msg).is_err() {
+                                eprintln!("Failed to send message through channel");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Only log errors that aren't EAGAIN (Resource temporarily unavailable)
+                        if e.kind() != ErrorKind::WouldBlock {
+                            eprintln!("Error reading from pipe: {}", e);
+                        }
+                    }
+                }
+            }
+            // Small delay before reopening the pipe
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
     });
 
     // Message handling loop
