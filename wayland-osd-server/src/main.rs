@@ -53,18 +53,16 @@ fn load_icon_from_string(svg_data: &str) -> gtk::Image {
     gtk::Image::from_paintable(Some(&texture))
 }
 
-fn get_volume_icon(value: i32, max_value: i32, muted: bool) -> gtk::Image {
+fn get_volume_icon(value: i32, muted: bool) -> gtk::Image {
     if muted {
         return load_icon_from_string(ICON_VOLUME_MUTED);
     }
 
-    let percentage = (value as f64 / max_value as f64) * 100.0;
-
-    let icon_data = if percentage > 100.0 {
+    let icon_data = if value > 100 {
         ICON_VOLUME_OVERAMPLIFIED
-    } else if percentage > 66.0 {
+    } else if value > 66 {
         ICON_VOLUME_HIGH
-    } else if percentage > 33.0 {
+    } else if value > 33 {
         ICON_VOLUME_MEDIUM
     } else {
         ICON_VOLUME_LOW
@@ -101,6 +99,12 @@ fn setup_css() -> gtk::CssProvider {
             min-height: 10px;
             background-color: #729fcf;
             border-radius: 5px;
+        }
+        progressbar.overamplified progress {
+            background-color: #cc0000;
+        }
+        progressbar.overamplified trough {
+            background-color: rgba(204, 0, 0, 0.3) !important;
         }
         label {
             color: white;
@@ -187,12 +191,28 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                     "Volume update - level: {}, max: {}, muted: {:?}",
                     value, max, msg.muted
                 );
-                ui.progress_bar.set_fraction(value as f64 / max as f64);
+                let fraction = value as f64 / max as f64;
+                ui.progress_bar.set_fraction(fraction);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
 
+                // Add CSS classes based on volume level
+                let style_context = ui.progress_bar.style_context();
+                if value > 100 {
+                    style_context.add_class("overamplified");
+                } else {
+                    style_context.remove_class("overamplified");
+                }
+
+                // Only show marker when max value is over 100
+                if max > 100 {
+                    style_context.add_class("with-marker");
+                } else {
+                    style_context.remove_class("with-marker");
+                }
+
                 // Update icon based on volume level and muted state
-                let new_icon = get_volume_icon(value, max, msg.muted.unwrap_or(false));
+                let new_icon = get_volume_icon(value, msg.muted.unwrap_or(false));
                 if let Some(paintable) = new_icon.paintable() {
                     ui.icon.set_paintable(Some(&paintable));
                     trace!("Updated volume icon");
