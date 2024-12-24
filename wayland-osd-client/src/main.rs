@@ -30,6 +30,9 @@ enum Commands {
         /// Show muted state
         #[arg(long)]
         mute: bool,
+        /// Audio device name
+        #[arg(long)]
+        device: Option<String>,
     },
     /// Control brightness-related OSD
     Brightness {
@@ -102,12 +105,14 @@ fn main() -> anyhow::Result<()> {
             volume,
             max_volume,
             mute,
+            device,
         } => {
             let message = json!({
                 "type": "volume",
                 "value": volume,
                 "max_value": max_volume,
-                "muted": mute
+                "muted": mute,
+                "device_name": device
             });
             client.send_message(&message.to_string())?;
         }

@@ -35,12 +35,14 @@ struct OsdMessage {
     max_value: Option<i32>,
     text: Option<String>,
     muted: Option<bool>,
+    device_name: Option<String>,
 }
 
 struct UiElements {
     window: gtk::ApplicationWindow,
     progress_bar: gtk::ProgressBar,
     label: gtk::Label,
+    device_label: gtk::Label,
     icon: gtk::Image,
     drawing_area: gtk::DrawingArea,
     max_value: Arc<Mutex<i32>>,
@@ -78,9 +80,13 @@ fn setup_css() -> gtk::CssProvider {
         window {
             background-color: rgba(0, 0, 0, 0.8);
             transform: translateX(-50%);
+            border-radius: 10px;
         }
         .osd-overlay {
-            margin: 20px;
+            margin-left: 10px;
+            margin-right: 10px;
+            margin-top: 5px;
+            margin-bottom: 5px;
             padding: 10px;
         }
         progressbar {
@@ -106,6 +112,12 @@ fn setup_css() -> gtk::CssProvider {
             color: white;
             font-size: 16px;
         }
+        .device-label {
+            color: #cccccc;
+            font-size: 12px;
+            margin-top: -10px;
+            margin-bottom: -10px;
+        }
     ";
     provider.load_from_data(css_data);
     provider
@@ -115,8 +127,6 @@ fn create_ui(app: &gtk::Application) -> UiElements {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Wayland OSD")
-        .default_width(200)
-        .default_height(60)
         .build();
 
     // Initialize as layer shell window
@@ -189,10 +199,15 @@ fn create_ui(app: &gtk::Application) -> UiElements {
     let label = gtk::Label::new(None);
     label.set_visible(false);
 
+    let device_label = gtk::Label::new(None);
+    device_label.set_visible(false);
+    device_label.set_css_classes(&["device-label"]);
+
     hbox.append(&icon);
     hbox.append(&progress_overlay);
 
     main_box.append(&hbox);
+    main_box.append(&device_label);
     main_box.append(&label);
     window.set_child(Some(&main_box));
 
@@ -202,6 +217,7 @@ fn create_ui(app: &gtk::Application) -> UiElements {
         window,
         progress_bar,
         label,
+        device_label,
         icon,
         drawing_area,
         max_value,
@@ -223,6 +239,14 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 ui.progress_bar.set_fraction(fraction);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
+                
+                // Update device name if provided
+                if let Some(device_name) = msg.device_name {
+                    ui.device_label.set_text(&device_name);
+                    ui.device_label.set_visible(true);
+                } else {
+                    ui.device_label.set_visible(false);
+                }
 
                 // Add CSS classes based on volume level
                 let style_context = ui.progress_bar.style_context();
@@ -258,6 +282,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 ui.progress_bar.set_fraction(value as f64 / max as f64);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
+                ui.device_label.set_visible(false);
                 ui.drawing_area.set_visible(false); // Always hide marker for brightness
 
                 let brightness_icon = load_icon_from_string(ICON_BRIGHTNESS);
@@ -277,6 +302,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 ui.label.set_visible(true);
                 ui.progress_bar.set_visible(false);
                 ui.icon.set_visible(false);
+                ui.device_label.set_visible(false);
                 ui.drawing_area.set_visible(false); // Hide marker for text messages
             } else {
                 warn!("Received text message with no text content");
