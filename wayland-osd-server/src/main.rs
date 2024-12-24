@@ -1,6 +1,5 @@
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -12,10 +11,8 @@ use gtk::{
 };
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use log::{debug, error, info, trace, warn};
-use nix::libc;
 use nix::sys::stat;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 const PIPE_PATH: &str = "/tmp/wayland-osd.pipe";
 
@@ -71,11 +68,6 @@ fn get_volume_icon(value: i32, muted: bool) -> gtk::Image {
     };
 
     load_icon_from_string(icon_data)
-}
-
-#[derive(Debug, Clone)]
-struct OsdServer {
-    sender: mpsc::UnboundedSender<OsdMessage>,
 }
 
 fn setup_css() -> gtk::CssProvider {
@@ -294,6 +286,8 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
         }
     }
 
+    debug!("Getting to end of building window");
+
     // Remove existing timeout if any
     if let Some(source_id) = ui.timeout_source_id.lock().unwrap().take() {
         unsafe {
@@ -311,6 +305,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
     }
 
     ui.window.set_visible(true);
+    debug!("Showing window");
 
     // Schedule new hide timeout after 3 seconds
     let window = ui.window.clone();
@@ -344,8 +339,8 @@ fn setup_pipe() -> anyhow::Result<()> {
     info!("Named pipe setup complete");
     Ok(())
 }
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+
+fn main() -> anyhow::Result<()> {
     // Initialize logger with timestamp and module path
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .format_timestamp_millis()
@@ -358,10 +353,6 @@ async fn main() -> anyhow::Result<()> {
     debug!("Setting up named pipe at {}", PIPE_PATH);
     setup_pipe()?;
 
-    let (sender, mut receiver) = mpsc::unbounded_channel::<OsdMessage>();
-    let server = OsdServer { sender };
-    debug!("Created message channel and OSD server instance");
-
     info!("Initializing GTK application");
     let application = gtk::Application::builder()
         .application_id("org.wayland.osd")
@@ -373,103 +364,68 @@ async fn main() -> anyhow::Result<()> {
     application.connect_activate(move |app| {
         let ui = create_ui(app);
         *ui_elements_clone.lock() = Some(ui);
-    });
 
-    // Spawn pipe reading task
-    info!("Starting pipe reading task");
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        loop {
-            debug!("Opening pipe for reading at {}", PIPE_PATH);
-            // First open in blocking mode to ensure we're ready for clients
+        // Start pipe reading in the GTK main context
+        let ui_elements = ui_elements_clone.clone();
+        glib::source::idle_add_local(move || {
+            let ui_elements = ui_elements.clone();
+            let mut buffer = Vec::with_capacity(4096);
+            let mut read_buffer = [0u8; 1024];
+            const MAX_MESSAGE_SIZE: usize = 8192;
+
             match OpenOptions::new().read(true).open(PIPE_PATH) {
-                Ok(file) => {
+                Ok(mut file) => {
                     trace!("Successfully opened pipe");
-                    let mut file = file;
-                    let mut buffer = Vec::with_capacity(4096); // Pre-allocate reasonable size
-                    let mut read_buffer = [0u8; 1024];
-                    const MAX_MESSAGE_SIZE: usize = 8192; // Maximum allowed message size
+                    match file.read(&mut read_buffer) {
+                        Ok(0) => {
+                            debug!("Pipe closed by writer, reopening...");
+                        }
+                        Ok(n) => {
+                            let mut start = 0;
+                            for (i, &byte) in read_buffer[..n].iter().enumerate() {
+                                if byte == 0 {
+                                    if !buffer.is_empty() || i > start {
+                                        buffer.extend_from_slice(&read_buffer[start..i]);
 
-                    loop {
-                        match file.read(&mut read_buffer) {
-                            Ok(0) => {
-                                // EOF - pipe was closed on the write end
-                                debug!("Pipe closed by writer, reopening...");
-                                break;
-                            }
-                            Ok(n) => {
-                                let mut start = 0;
-                                for (i, &byte) in read_buffer[..n].iter().enumerate() {
-                                    if byte == 0 {
-                                        // Process the message up to this null byte
-                                        if !buffer.is_empty() || i > start {
-                                            // Add the chunk before the null byte
-                                            buffer.extend_from_slice(&read_buffer[start..i]);
-
-                                            // Check message size
-                                            if buffer.len() > MAX_MESSAGE_SIZE {
-                                                error!(
-                                                    "Message too large ({} bytes), discarding",
-                                                    buffer.len()
-                                                );
-                                                buffer.clear();
-                                            } else if !buffer.is_empty() {
-                                                // Try to parse the message
-                                                if let Ok(msg_str) =
-                                                    String::from_utf8(buffer.clone())
-                                                {
-                                                    trace!("Received raw message: {}", msg_str);
-                                                    match serde_json::from_str::<OsdMessage>(
-                                                        &msg_str,
-                                                    ) {
-                                                        Ok(msg) => {
-                                                            debug!("Parsed message: {:?}", msg);
-                                                            if server_clone
-                                                                .sender
-                                                                .send(msg)
-                                                                .is_err()
-                                                            {
-                                                                error!("Failed to send message through channel");
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            error!(
-                                                                "Failed to parse message '{}': {}",
-                                                                msg_str, e
-                                                            );
-                                                        }
+                                        if buffer.len() > MAX_MESSAGE_SIZE {
+                                            error!("Message too large ({} bytes), discarding", buffer.len());
+                                            buffer.clear();
+                                        } else if !buffer.is_empty() {
+                                            if let Ok(msg_str) = String::from_utf8(buffer.clone()) {
+                                                trace!("Received raw message: {}", msg_str);
+                                                if let Ok(msg) = serde_json::from_str::<OsdMessage>(&msg_str) {
+                                                    debug!("Parsed message: {:?}", msg);
+                                                    if let Some(ui) = &*ui_elements.lock() {
+                                                        handle_message(ui, msg);
+                                                    } else {
+                                                        warn!("UI elements not initialized, skipping message");
                                                     }
                                                 } else {
-                                                    error!("Invalid UTF-8 in message");
+                                                    error!("Failed to parse message: {}", msg_str);
                                                 }
+                                            } else {
+                                                error!("Invalid UTF-8 in message");
                                             }
-                                            buffer.clear();
                                         }
-                                        start = i + 1; // Start after the null byte
-                                    }
-                                }
-
-                                // Add any remaining data to the buffer
-                                if start < n {
-                                    let remaining = &read_buffer[start..n];
-                                    if buffer.len() + remaining.len() > MAX_MESSAGE_SIZE {
-                                        error!("Message would exceed size limit, discarding");
                                         buffer.clear();
-                                    } else {
-                                        buffer.extend_from_slice(remaining);
                                     }
+                                    start = i + 1;
                                 }
                             }
-                            Err(e) => {
-                                if e.kind() == ErrorKind::WouldBlock {
-                                    // No data available right now, wait a bit
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(10))
-                                        .await;
-                                    continue;
+
+                            if start < n {
+                                let remaining = &read_buffer[start..n];
+                                if buffer.len() + remaining.len() > MAX_MESSAGE_SIZE {
+                                    error!("Message would exceed size limit, discarding");
+                                    buffer.clear();
                                 } else {
-                                    error!("Error reading from pipe: {}", e);
-                                    break;
+                                    buffer.extend_from_slice(remaining);
                                 }
+                            }
+                        }
+                        Err(e) => {
+                            if e.kind() != ErrorKind::WouldBlock {
+                                error!("Error reading from pipe: {}", e);
                             }
                         }
                     }
@@ -478,26 +434,9 @@ async fn main() -> anyhow::Result<()> {
                     error!("Failed to open pipe: {}", e);
                 }
             }
-            debug!("Pipe reader loop ended, waiting before reopening");
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-    });
 
-    // Message handling loop
-    info!("Starting message handling loop");
-    let ui_elements_clone = ui_elements.clone();
-    let context = glib::MainContext::default();
-    context.spawn_local(async move {
-        debug!("Message handler spawned in glib context");
-        while let Some(msg) = receiver.recv().await {
-            trace!("Received message in handler: {:?}", msg);
-            if let Some(ui) = &*ui_elements_clone.lock() {
-                handle_message(ui, msg);
-            } else {
-                warn!("UI elements not initialized, skipping message");
-            }
-        }
-        error!("Message receiver closed unexpectedly");
+            glib::ControlFlow::Continue
+        });
     });
 
     application.run();
