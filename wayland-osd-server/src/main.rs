@@ -1,5 +1,6 @@
-use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Read};
+use std::fs;
+use std::io::ErrorKind;
+use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -12,6 +13,7 @@ use gtk::{
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use log::{debug, error, info, trace, warn};
 use nix::sys::stat;
+use nix::fcntl::{OFlag, open};
 use serde::{Deserialize, Serialize};
 
 const PIPE_PATH: &str = "/tmp/wayland-osd.pipe";
@@ -367,76 +369,86 @@ fn main() -> anyhow::Result<()> {
 
         // Start pipe reading in the GTK main context
         let ui_elements = ui_elements_clone.clone();
-        glib::source::idle_add_local(move || {
-            let ui_elements = ui_elements.clone();
-            let mut buffer = Vec::with_capacity(4096);
-            let mut read_buffer = [0u8; 1024];
-            const MAX_MESSAGE_SIZE: usize = 8192;
+        let mut buffer = Vec::with_capacity(4096);
+        let mut read_buffer = [0u8; 1024];
+        const MAX_MESSAGE_SIZE: usize = 8192;
 
-            match OpenOptions::new().read(true).open(PIPE_PATH) {
-                Ok(mut file) => {
-                    trace!("Successfully opened pipe");
-                    match file.read(&mut read_buffer) {
-                        Ok(0) => {
-                            debug!("Pipe closed by writer, reopening...");
+        // Open pipe in non-blocking mode
+        let pipe_fd = match open(PIPE_PATH, OFlag::O_RDONLY | OFlag::O_NONBLOCK, stat::Mode::empty()) {
+            Ok(fd) => {
+                trace!("Successfully opened pipe in non-blocking mode");
+                Some(fd)
+            }
+            Err(e) => {
+                error!("Failed to open pipe: {}", e);
+                None
+            }
+        };
+
+        if let Some(fd) = pipe_fd {
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd as RawFd) };
+            
+            glib::source::idle_add_local(move || {
+                match std::io::Read::read(&mut file, &mut read_buffer) {
+                    Ok(0) => {
+                        // Reopen pipe
+                        if let Ok(new_fd) = open(PIPE_PATH, OFlag::O_RDONLY | OFlag::O_NONBLOCK, stat::Mode::empty()) {
+                            file = unsafe { std::fs::File::from_raw_fd(new_fd as RawFd) };
                         }
-                        Ok(n) => {
-                            let mut start = 0;
-                            for (i, &byte) in read_buffer[..n].iter().enumerate() {
-                                if byte == 0 {
-                                    if !buffer.is_empty() || i > start {
-                                        buffer.extend_from_slice(&read_buffer[start..i]);
+                    }
+                    Ok(n) => {
+                        let mut start = 0;
+                        for (i, &byte) in read_buffer[..n].iter().enumerate() {
+                            if byte == 0 {
+                                if !buffer.is_empty() || i > start {
+                                    buffer.extend_from_slice(&read_buffer[start..i]);
 
-                                        if buffer.len() > MAX_MESSAGE_SIZE {
-                                            error!("Message too large ({} bytes), discarding", buffer.len());
-                                            buffer.clear();
-                                        } else if !buffer.is_empty() {
-                                            if let Ok(msg_str) = String::from_utf8(buffer.clone()) {
-                                                trace!("Received raw message: {}", msg_str);
-                                                if let Ok(msg) = serde_json::from_str::<OsdMessage>(&msg_str) {
-                                                    debug!("Parsed message: {:?}", msg);
-                                                    if let Some(ui) = &*ui_elements.lock() {
-                                                        handle_message(ui, msg);
-                                                    } else {
-                                                        warn!("UI elements not initialized, skipping message");
-                                                    }
+                                    if buffer.len() > MAX_MESSAGE_SIZE {
+                                        error!("Message too large ({} bytes), discarding", buffer.len());
+                                        buffer.clear();
+                                    } else if !buffer.is_empty() {
+                                        if let Ok(msg_str) = String::from_utf8(buffer.clone()) {
+                                            trace!("Received raw message: {}", msg_str);
+                                            if let Ok(msg) = serde_json::from_str::<OsdMessage>(&msg_str) {
+                                                debug!("Parsed message: {:?}", msg);
+                                                if let Some(ui) = &*ui_elements.lock() {
+                                                    handle_message(ui, msg);
                                                 } else {
-                                                    error!("Failed to parse message: {}", msg_str);
+                                                    warn!("UI elements not initialized, skipping message");
                                                 }
                                             } else {
-                                                error!("Invalid UTF-8 in message");
+                                                error!("Failed to parse message: {}", msg_str);
                                             }
+                                        } else {
+                                            error!("Invalid UTF-8 in message");
                                         }
-                                        buffer.clear();
                                     }
-                                    start = i + 1;
-                                }
-                            }
-
-                            if start < n {
-                                let remaining = &read_buffer[start..n];
-                                if buffer.len() + remaining.len() > MAX_MESSAGE_SIZE {
-                                    error!("Message would exceed size limit, discarding");
                                     buffer.clear();
-                                } else {
-                                    buffer.extend_from_slice(remaining);
                                 }
+                                start = i + 1;
                             }
                         }
-                        Err(e) => {
-                            if e.kind() != ErrorKind::WouldBlock {
-                                error!("Error reading from pipe: {}", e);
+
+                        if start < n {
+                            let remaining = &read_buffer[start..n];
+                            if buffer.len() + remaining.len() > MAX_MESSAGE_SIZE {
+                                error!("Message would exceed size limit, discarding");
+                                buffer.clear();
+                            } else {
+                                buffer.extend_from_slice(remaining);
                             }
                         }
                     }
+                    Err(e) => {
+                        if e.kind() != ErrorKind::WouldBlock {
+                            error!("Error reading from pipe: {}", e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to open pipe: {}", e);
-                }
-            }
 
-            glib::ControlFlow::Continue
-        });
+                glib::ControlFlow::Continue
+            });
+        }
     });
 
     application.run();
