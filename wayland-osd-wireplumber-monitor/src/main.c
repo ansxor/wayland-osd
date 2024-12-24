@@ -1,6 +1,7 @@
 #include "lib/log.h"
 #include <stdbool.h>
 #include <stdio.h>
+#include <math.h>
 #include <wireplumber-0.5/wp/wp.h>
 
 typedef struct {
@@ -14,7 +15,7 @@ typedef struct {
   u_int32_t node_id;
 } Context;
 
-bool is_valid_node_is(u_int32_t id) { return id > 0 && id < G_MAXUINT32; }
+bool is_valid_node_id(u_int32_t id) { return id > 0 && id < G_MAXUINT32; }
 
 static void cleanup_context(Context *context) {
   if (context) {
@@ -28,6 +29,38 @@ static void cleanup_context(Context *context) {
     }
     g_free(context);
   }
+}
+
+void on_update_volume(Context *context, u_int32_t id) {
+  log_debug("updating volume", id);
+  GVariant *variant = NULL;
+
+  if (!is_valid_node_id(id)) {
+    log_error("Invalid node id: %d", id);
+    return;
+  }
+
+  g_signal_emit_by_name(context->mixer_api, "get-volume", id, &variant);
+
+  if (variant == NULL) {
+    log_fatal("Node %d doesn't support volume", id);
+    exit(1);
+  }
+
+  double raw_volume;
+  double raw_min_step;
+  bool raw_muted;
+
+  g_variant_lookup(variant, "volume", "d", &raw_volume);
+  g_variant_lookup(variant, "step", "d", &raw_min_step);
+  g_variant_lookup(variant, "mute", "b", &raw_muted);
+
+  // FIXME: For some reason, trying to free the variant causes a segfault
+  // g_clear_pointer(&variant, g_variant_unref);
+
+  int volume = (int)lround(raw_volume * 100);
+
+  log_info("Volume: %d, min_step: %f, muted: %s", volume, raw_min_step, raw_muted ? "true" : "false");
 }
 
 void on_plugin_activated(__attribute__((unused)) WpObject *p, GAsyncResult *res,
@@ -113,16 +146,18 @@ void on_mixer_changed(Context *context, u_int32_t id) {
               id, name, context->default_node_name, context->node_id);
     return;
   }
+
+  on_update_volume(context, id);
 }
 
 void on_default_nodes_api_changed(Context *context) {
   log_debug("on_default_nodes_api_changed");
 
   u_int32_t default_node_id;
-  g_signal_emit_by_name(context->def_nodes_api, "get-default-node-id",
+  g_signal_emit_by_name(context->def_nodes_api, "get-default-node",
                         "Audio/Sink", &default_node_id);
 
-  if (!is_valid_node_is(default_node_id)) {
+  if (!is_valid_node_id(default_node_id)) {
     log_warn("Invalid default node id: %d", default_node_id);
     return;
   }
