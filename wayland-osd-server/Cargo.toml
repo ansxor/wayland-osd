@@ -13,3 +13,5 @@ anyhow = "1.0"
 parking_lot = "0.12"
 futures = "0.3"
 nix = { version = "0.26", features = ["fs"] }
+log = "0.4"
+env_logger = "0.10"

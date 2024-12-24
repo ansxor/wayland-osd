@@ -5,11 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use env_logger::Env;
 use gtk::{
     glib::{self, result_from_gboolean},
     prelude::*,
 };
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
+use log::{debug, error, info, trace, warn};
 use nix::libc;
 use nix::sys::stat;
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,7 @@ struct UiElements {
 }
 
 fn load_icon_from_string(svg_data: &str) -> gtk::Image {
+    // Add white fill color to SVG content
     let bytes = glib::Bytes::from_owned(svg_data.as_bytes().to_vec());
     let texture = gtk::gdk::Texture::from_bytes(&bytes).expect("Failed to load icon");
     gtk::Image::from_paintable(Some(&texture))
@@ -80,10 +83,6 @@ fn setup_css() -> gtk::CssProvider {
     let css_data = "
         window {
             background-color: rgba(0, 0, 0, 0.8);
-            min-width: 200px;
-            width: 600px;
-            margin-start: 50%;
-            margin-end: 50%;
             transform: translateX(-50%);
         }
         .osd-overlay {
@@ -116,8 +115,8 @@ fn create_ui(app: &gtk::Application) -> UiElements {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Wayland OSD")
-        .default_width(300)
-        .default_height(100)
+        .default_width(200)
+        .default_height(60)
         .build();
 
     // Initialize as layer shell window
@@ -148,6 +147,7 @@ fn create_ui(app: &gtk::Application) -> UiElements {
     let hbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(10)
+        .halign(gtk::Align::Center)
         .build();
 
     let icon = load_icon_from_string(ICON_VOLUME_MEDIUM);
@@ -178,10 +178,15 @@ fn create_ui(app: &gtk::Application) -> UiElements {
 }
 
 fn handle_message(ui: &UiElements, msg: OsdMessage) {
+    debug!("Handling message: {:?}", msg);
+
     match msg.message_type.as_str() {
         "volume" => {
             if let (Some(value), Some(max)) = (msg.value, msg.max_value) {
-                println!("received message: {}", value);
+                info!(
+                    "Volume update - level: {}, max: {}, muted: {:?}",
+                    value, max, msg.muted
+                );
                 ui.progress_bar.set_fraction(value as f64 / max as f64);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
@@ -190,32 +195,44 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 let new_icon = get_volume_icon(value, max, msg.muted.unwrap_or(false));
                 if let Some(paintable) = new_icon.paintable() {
                     ui.icon.set_paintable(Some(&paintable));
+                    trace!("Updated volume icon");
                 }
                 ui.icon.set_visible(true);
+            } else {
+                warn!("Received volume message with missing value or max_value");
             }
         }
         "brightness" => {
             if let (Some(value), Some(max)) = (msg.value, msg.max_value) {
-                println!("received message: {}", value);
+                info!("Brightness update - level: {}, max: {}", value, max);
                 ui.progress_bar.set_fraction(value as f64 / max as f64);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
                 let brightness_icon = load_icon_from_string(ICON_BRIGHTNESS);
                 if let Some(paintable) = brightness_icon.paintable() {
                     ui.icon.set_paintable(Some(&paintable));
+                    trace!("Updated brightness icon");
                 }
                 ui.icon.set_visible(true);
+            } else {
+                warn!("Received brightness message with missing value or max_value");
             }
         }
         "text" => {
             if let Some(text) = msg.text {
+                info!("Text message update: {}", text);
                 ui.label.set_text(&text);
                 ui.label.set_visible(true);
                 ui.progress_bar.set_visible(false);
                 ui.icon.set_visible(false);
+            } else {
+                warn!("Received text message with no text content");
             }
         }
-        _ => return,
+        _ => {
+            warn!("Received unknown message type: {}", msg.message_type);
+            return;
+        }
     }
 
     // Remove existing timeout if any
@@ -225,7 +242,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 glib::ffi::g_source_remove(source_id.as_raw()),
                 "Failed to remove source"
             ) {
-                eprintln!(
+                error!(
                     "Failed to remove source {}, it may have already been removed: {}",
                     source_id.as_raw(),
                     err.message
@@ -250,30 +267,43 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
 }
 
 fn setup_pipe() -> anyhow::Result<()> {
+    debug!("Setting up named pipe at {}", PIPE_PATH);
+
     // Remove existing pipe if it exists
     if Path::new(PIPE_PATH).exists() {
+        debug!("Removing existing pipe");
         fs::remove_file(PIPE_PATH)?;
     }
 
     // Create new pipe with proper permissions
+    debug!("Creating new pipe with permissions");
     nix::unistd::mkfifo(
         PIPE_PATH,
         stat::Mode::S_IRUSR | stat::Mode::S_IWUSR | stat::Mode::S_IWGRP | stat::Mode::S_IWOTH,
     )?;
 
+    info!("Named pipe setup complete");
     Ok(())
 }
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Initialize logger with timestamp and module path
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .format_module_path(true)
+        .init();
+
+    info!("Starting Wayland OSD server");
     gtk::init()?;
 
-    // Set up the named pipe
+    debug!("Setting up named pipe at {}", PIPE_PATH);
     setup_pipe()?;
 
     let (sender, mut receiver) = mpsc::unbounded_channel::<OsdMessage>();
     let server = OsdServer { sender };
+    debug!("Created message channel and OSD server instance");
 
+    info!("Initializing GTK application");
     let application = gtk::Application::builder()
         .application_id("org.wayland.osd")
         .build();
@@ -287,48 +317,67 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Spawn pipe reading task
+    info!("Starting pipe reading task");
     let server_clone = server.clone();
     tokio::spawn(async move {
         loop {
-            // Open the pipe for reading
-            let file = OpenOptions::new()
+            debug!("Opening pipe for reading at {}", PIPE_PATH);
+            match OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NONBLOCK)
                 .open(PIPE_PATH)
-                .unwrap();
-
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                match line {
-                    Ok(message) => {
-                        if let Ok(msg) = serde_json::from_str::<OsdMessage>(&message) {
-                            if server_clone.sender.send(msg).is_err() {
-                                eprintln!("Failed to send message through channel");
+            {
+                Ok(file) => {
+                    trace!("Successfully opened pipe");
+                    let reader = BufReader::new(file);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(message) => {
+                                trace!("Received raw message: {}", message);
+                                match serde_json::from_str::<OsdMessage>(&message) {
+                                    Ok(msg) => {
+                                        debug!("Parsed message: {:?}", msg);
+                                        if server_clone.sender.send(msg).is_err() {
+                                            error!("Failed to send message through channel");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to parse message '{}': {}", message, e)
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if e.kind() != ErrorKind::WouldBlock {
+                                    error!("Error reading from pipe: {}", e);
+                                }
                             }
                         }
                     }
-                    Err(e) => {
-                        // Only log errors that aren't EAGAIN (Resource temporarily unavailable)
-                        if e.kind() != ErrorKind::WouldBlock {
-                            eprintln!("Error reading from pipe: {}", e);
-                        }
-                    }
+                }
+                Err(e) => {
+                    error!("Failed to open pipe: {}", e);
                 }
             }
-            // Small delay before reopening the pipe
+            debug!("Pipe reader loop ended, waiting before reopening");
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     });
 
     // Message handling loop
+    info!("Starting message handling loop");
     let ui_elements_clone = ui_elements.clone();
     let context = glib::MainContext::default();
     context.spawn_local(async move {
+        debug!("Message handler spawned in glib context");
         while let Some(msg) = receiver.recv().await {
+            trace!("Received message in handler: {:?}", msg);
             if let Some(ui) = &*ui_elements_clone.lock() {
                 handle_message(ui, msg);
+            } else {
+                warn!("UI elements not initialized, skipping message");
             }
         }
+        error!("Message receiver closed unexpectedly");
     });
 
     application.run();
