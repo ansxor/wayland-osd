@@ -58,7 +58,7 @@ void on_update_volume(Context *context, u_int32_t id) {
   // FIXME: For some reason, trying to free the variant causes a segfault
   // g_clear_pointer(&variant, g_variant_unref);
 
-  int volume = (int)lround(raw_volume * 100);
+  int volume = (int)lround(cbrt(raw_volume) * 100);
 
   log_info("Volume: %d, min_step: %f, muted: %s", volume, raw_min_step, raw_muted ? "true" : "false");
 }
