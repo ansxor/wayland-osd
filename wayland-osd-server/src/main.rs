@@ -215,7 +215,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
     match msg.message_type.as_str() {
         "volume" => {
             if let (Some(value), Some(max)) = (msg.value, msg.max_value) {
-                info!(
+                debug!(
                     "Volume update - level: {}, max: {}, muted: {:?}",
                     value, max, msg.muted
                 );
@@ -391,10 +391,8 @@ fn main() -> anyhow::Result<()> {
             glib::source::idle_add_local(move || {
                 match std::io::Read::read(&mut file, &mut read_buffer) {
                     Ok(0) => {
-                        // Reopen pipe
-                        if let Ok(new_fd) = open(PIPE_PATH, OFlag::O_RDONLY | OFlag::O_NONBLOCK, stat::Mode::empty()) {
-                            file = unsafe { std::fs::File::from_raw_fd(new_fd as RawFd) };
-                        }
+                        // EOF received, but we don't need to reopen since we use message delimiters
+                        trace!("EOF received, continuing to next iteration");
                     }
                     Ok(n) => {
                         let mut start = 0;
