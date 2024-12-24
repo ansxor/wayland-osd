@@ -4,7 +4,9 @@
 
 A lightweight On-Screen Display (OSD) system for Wayland compositors. This project provides a client-server architecture for displaying various system notifications like volume changes, brightness adjustments, and keyboard state indicators.
 
-The motivation behind this project is that all of the OSDs that were available were coupled way too tightly with backends for
+The motivation behind this project is that all of the OSDs that were available were coupled way too tightly with particular tools for tracking system state like `pactl`.
+
+Wob is almost there but not quite for me as it's not as visually pretty for me.
 
 ## Components
 
@@ -79,6 +81,11 @@ wayland-osd-client brightness 80
 - [ ] Customizable CSS
 - [ ] Brightness
 - [ ] Caps Lock
+
+## Inspired By
+
+- [SwayOSD: A GTK based on screen display for keyboard shortcuts like caps-lock and volume ](https://github.com/ErikReider/SwayOSD)
+- [Wob: A lightweight overlay volume/backlight/progress/anything bar for Wayland. ](https://github.com/francma/wob)
 
 ## License
 
