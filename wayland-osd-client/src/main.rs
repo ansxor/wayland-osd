@@ -54,13 +54,37 @@ impl OsdClient {
     }
 
     fn send_message(&self, message: &str) -> anyhow::Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(PIPE_PATH)
-            .context("Failed to open OSD pipe")?;
+        // Try to open pipe multiple times
+        let mut attempts = 0;
+        let max_attempts = 5;
+        let mut last_error = None;
 
-        writeln!(file, "{}", message).context("Failed to write to OSD pipe")?;
-        Ok(())
+        while attempts < max_attempts {
+            match OpenOptions::new().write(true).open(PIPE_PATH) {
+                Ok(mut file) => {
+                    // Create a single buffer with message and separator to ensure atomic write
+                    let mut buffer = message.as_bytes().to_vec();
+                    buffer.push(0);
+                    file.write_all(&buffer)
+                        .context("Failed to write message to OSD pipe")?;
+                    // Ensure the write is flushed
+                    file.flush()
+                        .context("Failed to flush message to OSD pipe")?;
+                    // Add a small delay to prevent overwhelming the server
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    attempts += 1;
+                    if attempts < max_attempts {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap().into())
     }
 }
 

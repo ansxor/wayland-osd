@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, ErrorKind};
+use std::io::{ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -322,33 +322,94 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         loop {
             debug!("Opening pipe for reading at {}", PIPE_PATH);
-            match OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(PIPE_PATH)
-            {
+            // First open in blocking mode to ensure we're ready for clients
+            match OpenOptions::new().read(true).open(PIPE_PATH) {
                 Ok(file) => {
                     trace!("Successfully opened pipe");
-                    let reader = BufReader::new(file);
-                    for line in reader.lines() {
-                        match line {
-                            Ok(message) => {
-                                trace!("Received raw message: {}", message);
-                                match serde_json::from_str::<OsdMessage>(&message) {
-                                    Ok(msg) => {
-                                        debug!("Parsed message: {:?}", msg);
-                                        if server_clone.sender.send(msg).is_err() {
-                                            error!("Failed to send message through channel");
+                    let mut file = file;
+                    let mut buffer = Vec::with_capacity(4096); // Pre-allocate reasonable size
+                    let mut read_buffer = [0u8; 1024];
+                    const MAX_MESSAGE_SIZE: usize = 8192; // Maximum allowed message size
+
+                    loop {
+                        match file.read(&mut read_buffer) {
+                            Ok(0) => {
+                                // EOF - pipe was closed on the write end
+                                debug!("Pipe closed by writer, reopening...");
+                                break;
+                            }
+                            Ok(n) => {
+                                let mut start = 0;
+                                for (i, &byte) in read_buffer[..n].iter().enumerate() {
+                                    if byte == 0 {
+                                        // Process the message up to this null byte
+                                        if !buffer.is_empty() || i > start {
+                                            // Add the chunk before the null byte
+                                            buffer.extend_from_slice(&read_buffer[start..i]);
+
+                                            // Check message size
+                                            if buffer.len() > MAX_MESSAGE_SIZE {
+                                                error!(
+                                                    "Message too large ({} bytes), discarding",
+                                                    buffer.len()
+                                                );
+                                                buffer.clear();
+                                            } else if !buffer.is_empty() {
+                                                // Try to parse the message
+                                                if let Ok(msg_str) =
+                                                    String::from_utf8(buffer.clone())
+                                                {
+                                                    trace!("Received raw message: {}", msg_str);
+                                                    match serde_json::from_str::<OsdMessage>(
+                                                        &msg_str,
+                                                    ) {
+                                                        Ok(msg) => {
+                                                            debug!("Parsed message: {:?}", msg);
+                                                            if server_clone
+                                                                .sender
+                                                                .send(msg)
+                                                                .is_err()
+                                                            {
+                                                                error!("Failed to send message through channel");
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            error!(
+                                                                "Failed to parse message '{}': {}",
+                                                                msg_str, e
+                                                            );
+                                                        }
+                                                    }
+                                                } else {
+                                                    error!("Invalid UTF-8 in message");
+                                                }
+                                            }
+                                            buffer.clear();
                                         }
+                                        start = i + 1; // Start after the null byte
                                     }
-                                    Err(e) => {
-                                        error!("Failed to parse message '{}': {}", message, e)
+                                }
+
+                                // Add any remaining data to the buffer
+                                if start < n {
+                                    let remaining = &read_buffer[start..n];
+                                    if buffer.len() + remaining.len() > MAX_MESSAGE_SIZE {
+                                        error!("Message would exceed size limit, discarding");
+                                        buffer.clear();
+                                    } else {
+                                        buffer.extend_from_slice(remaining);
                                     }
                                 }
                             }
                             Err(e) => {
-                                if e.kind() != ErrorKind::WouldBlock {
+                                if e.kind() == ErrorKind::WouldBlock {
+                                    // No data available right now, wait a bit
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(10))
+                                        .await;
+                                    continue;
+                                } else {
                                     error!("Error reading from pipe: {}", e);
+                                    break;
                                 }
                             }
                         }
