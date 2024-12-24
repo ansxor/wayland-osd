@@ -43,6 +43,8 @@ struct UiElements {
     progress_bar: gtk::ProgressBar,
     label: gtk::Label,
     icon: gtk::Image,
+    drawing_area: gtk::DrawingArea,
+    max_value: Arc<Mutex<i32>>,
     timeout_source_id: Arc<Mutex<Option<glib::SourceId>>>,
 }
 
@@ -141,7 +143,7 @@ fn create_ui(app: &gtk::Application) -> UiElements {
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    let overlay = gtk::Box::builder()
+    let main_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
         .css_classes(vec!["osd-overlay"])
@@ -157,18 +159,48 @@ fn create_ui(app: &gtk::Application) -> UiElements {
     let icon = load_icon_from_string(ICON_VOLUME_MEDIUM);
     icon.set_visible(false);
 
+    // Create an overlay for progress bar and marker line
+    let progress_overlay = gtk::Overlay::new();
+
     let progress_bar = gtk::ProgressBar::new();
     progress_bar.set_visible(false);
+    progress_overlay.set_child(Some(&progress_bar));
+
+    // Create drawing area for the marker line
+    let drawing_area = gtk::DrawingArea::new();
+    drawing_area.set_visible(false);
+    drawing_area.set_can_target(false);
+    drawing_area.set_content_height(10); // Match progress bar height
+
+    // Create shared max_value for drawing area
+    let max_value = Arc::new(Mutex::new(100));
+    let max_value_for_draw = max_value.clone();
+
+    drawing_area.set_draw_func(move |_area, cr, width, height| {
+        // Draw white vertical line
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.8);
+        cr.set_line_width(2.0);
+
+        // Position line at 100% mark using the current max_value
+        let max = *max_value_for_draw.lock().unwrap();
+        let x = (width as f64) * (100.0 / max as f64);
+        trace!("Drawing line to y={}", height);
+        cr.move_to(x, 1.0);
+        cr.line_to(x, 11.0);
+        cr.stroke().expect("Failed to draw line");
+    });
+
+    progress_overlay.add_overlay(&drawing_area);
 
     let label = gtk::Label::new(None);
     label.set_visible(false);
 
     hbox.append(&icon);
-    hbox.append(&progress_bar);
+    hbox.append(&progress_overlay);
 
-    overlay.append(&hbox);
-    overlay.append(&label);
-    window.set_child(Some(&overlay));
+    main_box.append(&hbox);
+    main_box.append(&label);
+    window.set_child(Some(&main_box));
 
     window.set_visible(false);
 
@@ -177,6 +209,8 @@ fn create_ui(app: &gtk::Application) -> UiElements {
         progress_bar,
         label,
         icon,
+        drawing_area,
+        max_value,
         timeout_source_id: Arc::new(Mutex::new(None)),
     }
 }
@@ -204,11 +238,13 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                     style_context.remove_class("overamplified");
                 }
 
-                // Only show marker when max value is over 100
+                // Update max value and show/hide marker line
                 if max > 100 {
-                    style_context.add_class("with-marker");
+                    *ui.max_value.lock().unwrap() = max;
+                    ui.drawing_area.set_visible(true);
+                    ui.drawing_area.queue_draw(); // Force redraw with new max value
                 } else {
-                    style_context.remove_class("with-marker");
+                    ui.drawing_area.set_visible(false);
                 }
 
                 // Update icon based on volume level and muted state
@@ -228,6 +264,8 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 ui.progress_bar.set_fraction(value as f64 / max as f64);
                 ui.progress_bar.set_visible(true);
                 ui.label.set_visible(false);
+                ui.drawing_area.set_visible(false); // Always hide marker for brightness
+
                 let brightness_icon = load_icon_from_string(ICON_BRIGHTNESS);
                 if let Some(paintable) = brightness_icon.paintable() {
                     ui.icon.set_paintable(Some(&paintable));
@@ -245,6 +283,7 @@ fn handle_message(ui: &UiElements, msg: OsdMessage) {
                 ui.label.set_visible(true);
                 ui.progress_bar.set_visible(false);
                 ui.icon.set_visible(false);
+                ui.drawing_area.set_visible(false); // Hide marker for text messages
             } else {
                 warn!("Received text message with no text content");
             }
