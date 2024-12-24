@@ -12,9 +12,7 @@ Wob is almost there but not quite for me as it's not as visually pretty for me.
 
 - **wayland-osd-server**: A GTK4-based server that handles the actual display of OSD elements using Wayland's layer shell protocol
 - **wayland-osd-client**: A command-line client for sending OSD requests to the server
-- **Examples**:
-  - `audio-osd.fish`: A Fish shell script for displaying audio volume changes
-  - `pipewire-monitor`: A PipeWire monitor example for audio events
+- **wayland-osd-wireplumber-monitor**: A WirePlumber-based monitor for audio events
 
 ## Features
 
@@ -35,14 +33,21 @@ Wob is almost there but not quite for me as it's not as visually pretty for me.
 - Rust toolchain
 - GTK4 development files
 - GTK Layer Shell
+- WirePlumber development files (wireplumber-0.5)
+- C compiler with C23 support
+- make
 
-2. Build and install using Rust:
+2. Build and install the components:
 
 ```bash
+# Build and install the client and server
 cargo install --path ./wayland-osd-client
 cargo install --path ./wayland-osd-server
-# optional if you want to use included pipewire monitor
-cargo install --path ./examples/pipewire-monitor
+
+# Build and install the wireplumber monitor
+cd wayland-osd-wireplumber-monitor
+make
+# now move the exported file to whatever
 ```
 
 3. Start service in startup script:
@@ -51,8 +56,7 @@ This uses the Hyprland configuration as an example:
 
 ```conf
 exec-once = $HOME/.cargo/bin/wayland-osd-server
-# if you're using the pipewire monitor
-exec-once = $HOME/.cargo/bin/pipewire-monitor $HOME/.cargo/bin/wayland-osd-client
+exec-once = path-to-monitor/wayland-osd-wireplumber-monitor $HOME/.cargo/bin/wayland-osd-client
 ```
 
 ## Usage
@@ -90,7 +94,3 @@ wayland-osd-client brightness 80
 ## License
 
 MIT License
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
