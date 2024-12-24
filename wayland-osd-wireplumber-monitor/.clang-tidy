@@ -1,0 +1,11 @@
+Checks: >
+  -clang-analyzer-cplusplus.NewDelete
+  -clang-analyzer-unix.Malloc
+  -clang-analyzer-core.NullDereference
+  -clang-analyzer-core.NonNullParamChecker
+  -cppcoreguidelines-owning-memory
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic
+  -hicpp-no-malloc
+WarningsAsErrors: "*"
+HeaderFilterRegex: ".*"
+ExtraArgs: ['-std=c23']
