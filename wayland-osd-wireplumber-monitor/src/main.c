@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <math.h>
 #include <wireplumber-0.5/wp/wp.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 typedef struct {
   WpCore *core;
@@ -13,6 +15,7 @@ typedef struct {
   u_int32_t pending_plugins;
   gchar *default_node_name;
   u_int32_t node_id;
+  const char *client_path;
 } Context;
 
 bool is_valid_node_id(u_int32_t id) { return id > 0 && id < G_MAXUINT32; }
@@ -28,6 +31,31 @@ static void cleanup_context(Context *context) {
       g_object_unref(context->core);
     }
     g_free(context);
+  }
+}
+
+void run_client(const char *client_path, int volume_percent, bool is_muted) {
+  log_debug("Running client with volume: %d%%, muted: %s", volume_percent, is_muted ? "true" : "false");
+
+  pid_t pid = fork();
+  if (pid == -1) {
+    log_error("Failed to fork process");
+    return;
+  }
+
+  if (pid == 0) { // Child process
+    char volume_str[16];
+    snprintf(volume_str, sizeof(volume_str), "%d", volume_percent);
+
+    if (is_muted) {
+      execl(client_path, client_path, "audio", volume_str, "--mute", NULL);
+    } else {
+      execl(client_path, client_path, "audio", volume_str, NULL);
+    }
+    
+    // If execl returns, there was an error
+    log_error("Failed to execute client at '%s'", client_path);
+    exit(1);
   }
 }
 
@@ -61,6 +89,9 @@ void on_update_volume(Context *context, u_int32_t id) {
   int volume = (int)lround(cbrt(raw_volume) * 100);
 
   log_info("Volume: %d, min_step: %f, muted: %s", volume, raw_min_step, raw_muted ? "true" : "false");
+  
+  // Call the wayland-osd-client
+  run_client(context->client_path, volume, raw_muted);
 }
 
 void on_plugin_activated(__attribute__((unused)) WpObject *p, GAsyncResult *res,
@@ -217,13 +248,38 @@ void on_object_manager_installed(Context *context) {
                            G_CALLBACK(on_default_nodes_api_changed), context);
 }
 
-int main() {
+bool check_client_executable(const char *client_path) {
+  if (access(client_path, F_OK) != 0) {
+    log_error("Client not found at '%s'", client_path);
+    return false;
+  }
+
+  if (access(client_path, X_OK) != 0) {
+    log_error("Client at '%s' is not executable", client_path);
+    return false;
+  }
+
+  return true;
+}
+
+int main(int argc, char *argv[]) {
+  const char *client_path = "wayland-osd-client";
+  if (argc > 1) {
+    client_path = argv[1];
+  }
+
+  if (!check_client_executable(client_path)) {
+    return 1;
+  }
+
   wp_init(WP_INIT_PIPEWIRE);
   Context *context = g_new0(Context, 1);
   context->core = wp_core_new(NULL, NULL, NULL);
   context->om = wp_object_manager_new();
   context->apis = g_ptr_array_new_with_free_func(g_object_unref);
+  context->client_path = client_path;
 
+  log_info("Using client path: %s", client_path);
   log_info("Connecting to pipewire...");
 
   if (!wp_core_connect(context->core)) {
