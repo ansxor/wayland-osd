@@ -83,7 +83,7 @@ wayland-osd-client brightness 80
 ## Todo
 
 - [ ] Customizable CSS
-- [ ] Brightness
+- [x] Brightness
 - [ ] Caps Lock
 
 ## Inspired By
