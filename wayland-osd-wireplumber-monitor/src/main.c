@@ -5,6 +5,18 @@
 #include <wireplumber-0.5/wp/wp.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <argp.h>
+
+const char *argp_program_version = "wayland-osd-wireplumber-monitor 1.0";
+const char *argp_program_bug_address = "https://github.com/ErikReider/wayland-osd";
+
+static char doc[] = "Wayland OSD Wireplumber Monitor -- A monitor for audio volume changes using wireplumber";
+static char args_doc[] = "[CLIENT_PATH]";
+
+static struct argp_option options[] = {
+    {"show-device-name", 'd', 0, 0, "Show the audio device name in the OSD", 0},
+    {0, 0, 0, 0, 0, 0}
+};
 
 typedef struct {
   WpCore *core;
@@ -16,7 +28,37 @@ typedef struct {
   gchar *default_node_name;
   u_int32_t node_id;
   const char *client_path;
+  bool show_device_name;
 } Context;
+
+struct arguments {
+    char *client_path;
+    bool show_device_name;
+};
+
+static error_t parse_opt(int key, char *arg, struct argp_state *state) {
+    struct arguments *arguments = state->input;
+
+    switch (key) {
+        case 'd':
+            arguments->show_device_name = true;
+            break;
+        case ARGP_KEY_ARG:
+            if (state->arg_num >= 1)
+                argp_usage(state);
+            arguments->client_path = arg;
+            break;
+        case ARGP_KEY_END:
+            if (state->arg_num == 0)
+                arguments->client_path = "wayland-osd-client";
+            break;
+        default:
+            return ARGP_ERR_UNKNOWN;
+    }
+    return 0;
+}
+
+static struct argp argp = {options, parse_opt, args_doc, doc, 0, 0, 0};
 
 bool is_valid_node_id(u_int32_t id) { return id > 0 && id < G_MAXUINT32; }
 
@@ -34,7 +76,7 @@ static void cleanup_context(Context *context) {
   }
 }
 
-void run_client(const char *client_path, int volume_percent, bool is_muted) {
+void run_client(const char *client_path, int volume_percent, bool is_muted, const char *device_name) {
   log_debug("Running client with volume: %d%%, muted: %s", volume_percent, is_muted ? "true" : "false");
 
   pid_t pid = fork();
@@ -47,8 +89,12 @@ void run_client(const char *client_path, int volume_percent, bool is_muted) {
     char volume_str[16];
     snprintf(volume_str, sizeof(volume_str), "%d", volume_percent);
 
-    if (is_muted) {
+    if (is_muted && device_name != NULL) {
+      execl(client_path, client_path, "audio", volume_str, "--mute", "--device", device_name, NULL);
+    } else if (is_muted && device_name == NULL) {
       execl(client_path, client_path, "audio", volume_str, "--mute", NULL);
+    }  else if (device_name != NULL) {
+      execl(client_path, client_path, "audio", volume_str, "--device", device_name, NULL);
     } else {
       execl(client_path, client_path, "audio", volume_str, NULL);
     }
@@ -91,7 +137,14 @@ void on_update_volume(Context *context, u_int32_t id) {
   log_info("Volume: %d, min_step: %f, muted: %s", volume, raw_min_step, raw_muted ? "true" : "false");
   
   // Call the wayland-osd-client
-  run_client(context->client_path, volume, raw_muted);
+  
+  if (context->show_device_name) {
+    log_info("Running client with volume: %d%%, muted: %s, device: %s", volume, raw_muted ? "true" : "false", context->default_node_name);
+    run_client(context->client_path, volume, raw_muted, context->default_node_name);
+  } else {
+    log_info("Running client with volume: %d%%, muted: %s", volume, raw_muted ? "true" : "false");
+    run_client(context->client_path, volume, raw_muted, NULL);
+  }
 }
 
 void on_plugin_activated(__attribute__((unused)) WpObject *p, GAsyncResult *res,
@@ -263,12 +316,13 @@ bool check_client_executable(const char *client_path) {
 }
 
 int main(int argc, char *argv[]) {
-  const char *client_path = "wayland-osd-client";
-  if (argc > 1) {
-    client_path = argv[1];
-  }
+  struct arguments arguments;
+  arguments.client_path = NULL;
+  arguments.show_device_name = false;
 
-  if (!check_client_executable(client_path)) {
+  argp_parse(&argp, argc, argv, 0, 0, &arguments);
+
+  if (!check_client_executable(arguments.client_path)) {
     return 1;
   }
 
@@ -277,9 +331,13 @@ int main(int argc, char *argv[]) {
   context->core = wp_core_new(NULL, NULL, NULL);
   context->om = wp_object_manager_new();
   context->apis = g_ptr_array_new_with_free_func(g_object_unref);
-  context->client_path = client_path;
+  context->client_path = arguments.client_path;
+  context->show_device_name = arguments.show_device_name;
 
-  log_info("Using client path: %s", client_path);
+  log_info("Using client path: %s", arguments.client_path);
+  if (arguments.show_device_name) {
+    log_info("Device name display enabled");
+  }
   log_info("Connecting to pipewire...");
 
   if (!wp_core_connect(context->core)) {
