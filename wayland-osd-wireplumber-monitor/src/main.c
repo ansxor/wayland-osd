@@ -1,6 +1,8 @@
+#define _GNU_SOURCE
 #include "lib/log.h"
 #include <stdbool.h>
 #include <stdio.h>
+#include <glib.h>
 #include <math.h>
 #include <wireplumber-0.5/wp/wp.h>
 #include <stdlib.h>
@@ -15,8 +17,19 @@ static char args_doc[] = "[CLIENT_PATH]";
 
 static struct argp_option options[] = {
     {"show-device-name", 'd', 0, 0, "Show the audio device name in the OSD", 0},
+    {"device-map", 'm', "FILE", 0, "File containing device name mappings", 0},
     {0, 0, 0, 0, 0, 0}
 };
+
+typedef struct {
+    char *pattern;
+    char *display_name;
+} DeviceMapping;
+
+typedef struct {
+    DeviceMapping *mappings;
+    size_t count;
+} DeviceMappings;
 
 typedef struct {
   WpCore *core;
@@ -29,12 +42,112 @@ typedef struct {
   u_int32_t node_id;
   const char *client_path;
   bool show_device_name;
+  DeviceMappings device_mappings;
 } Context;
 
 struct arguments {
     char *client_path;
     bool show_device_name;
+    char *device_map_file;
 };
+
+static void free_device_mappings(DeviceMappings *mappings) {
+    if (mappings->mappings) {
+        for (size_t i = 0; i < mappings->count; i++) {
+            free(mappings->mappings[i].pattern);
+            free(mappings->mappings[i].display_name);
+        }
+        free(mappings->mappings);
+    }
+    mappings->mappings = NULL;
+    mappings->count = 0;
+}
+
+static bool load_device_mappings(const char *filename, DeviceMappings *mappings) {
+    if (!filename) {
+        mappings->mappings = NULL;
+        mappings->count = 0;
+        return true;
+    }
+
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        log_error("Failed to open device mapping file: %s", filename);
+        return false;
+    }
+
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    size_t capacity = 10;
+    size_t count = 0;
+
+    mappings->mappings = malloc(capacity * sizeof(DeviceMapping));
+    if (!mappings->mappings) {
+        fclose(file);
+        return false;
+    }
+
+    while ((read = getline(&line, &len, file)) != -1) {
+        if (read > 0 && line[read-1] == '\n') {
+            line[read-1] = '\0';
+        }
+
+        // Skip empty lines and comments
+        if (read <= 1 || line[0] == '#') {
+            continue;
+        }
+
+        char *separator = strchr(line, '=');
+        if (!separator) {
+            continue;
+        }
+
+        *separator = '\0';
+        char *pattern = g_strdup(line);
+        char *display_name = g_strdup(separator + 1);
+
+        if (!pattern || !display_name) {
+            g_free(pattern);
+            g_free(display_name);
+            continue;
+        }
+
+        if (count >= capacity) {
+            capacity *= 2;
+            DeviceMapping *new_mappings = realloc(mappings->mappings, capacity * sizeof(DeviceMapping));
+            if (!new_mappings) {
+                free(pattern);
+                free(display_name);
+                break;
+            }
+            mappings->mappings = new_mappings;
+        }
+
+        mappings->mappings[count].pattern = pattern;
+        mappings->mappings[count].display_name = display_name;
+        count++;
+    }
+
+    free(line);
+    fclose(file);
+    mappings->count = count;
+    return true;
+}
+
+static const char* get_mapped_device_name(const DeviceMappings *mappings, const char *device_name) {
+    if (!mappings || !mappings->mappings || !device_name) {
+        return device_name;
+    }
+
+    for (size_t i = 0; i < mappings->count; i++) {
+        if (strstr(device_name, mappings->mappings[i].pattern) != NULL) {
+            return mappings->mappings[i].display_name;
+        }
+    }
+
+    return device_name;
+}
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     struct arguments *arguments = state->input;
@@ -42,6 +155,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     switch (key) {
         case 'd':
             arguments->show_device_name = true;
+            break;
+        case 'm':
+            arguments->device_map_file = arg;
             break;
         case ARGP_KEY_ARG:
             if (state->arg_num >= 1)
@@ -72,6 +188,7 @@ static void cleanup_context(Context *context) {
       wp_core_disconnect(context->core);
       g_object_unref(context->core);
     }
+    free_device_mappings(&context->device_mappings);
     g_free(context);
   }
 }
@@ -139,8 +256,9 @@ void on_update_volume(Context *context, u_int32_t id) {
   // Call the wayland-osd-client
   
   if (context->show_device_name) {
-    log_info("Running client with volume: %d%%, muted: %s, device: %s", volume, raw_muted ? "true" : "false", context->default_node_name);
-    run_client(context->client_path, volume, raw_muted, context->default_node_name);
+    const char *display_name = get_mapped_device_name(&context->device_mappings, context->default_node_name);
+    log_info("Running client with volume: %d%%, muted: %s, device: %s", volume, raw_muted ? "true" : "false", display_name);
+    run_client(context->client_path, volume, raw_muted, display_name);
   } else {
     log_info("Running client with volume: %d%%, muted: %s", volume, raw_muted ? "true" : "false");
     run_client(context->client_path, volume, raw_muted, NULL);
@@ -319,8 +437,13 @@ int main(int argc, char *argv[]) {
   struct arguments arguments;
   arguments.client_path = NULL;
   arguments.show_device_name = false;
+  arguments.device_map_file = NULL;
 
   argp_parse(&argp, argc, argv, 0, 0, &arguments);
+
+  if (arguments.device_map_file) {
+    log_info("Loading device mappings from: %s", arguments.device_map_file);
+  }
 
   if (!check_client_executable(arguments.client_path)) {
     return 1;
@@ -333,10 +456,19 @@ int main(int argc, char *argv[]) {
   context->apis = g_ptr_array_new_with_free_func(g_object_unref);
   context->client_path = arguments.client_path;
   context->show_device_name = arguments.show_device_name;
+  
+  if (!load_device_mappings(arguments.device_map_file, &context->device_mappings)) {
+    log_error("Failed to load device mappings");
+    g_free(context);
+    return 1;
+  }
 
   log_info("Using client path: %s", arguments.client_path);
   if (arguments.show_device_name) {
     log_info("Device name display enabled");
+  }
+  if (arguments.device_map_file && context->device_mappings.count > 0) {
+    log_info("Loaded %zu device name mappings", context->device_mappings.count);
   }
   log_info("Connecting to pipewire...");
 
