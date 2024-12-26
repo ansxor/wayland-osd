@@ -16,10 +16,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    
     - uses: actions/checkout@v4
     - name: Build Client
       working-directory: ./wayland-osd-client
       run: cargo build --verbose
-    - name: Run Server
+    - name: Install dependencies for Server
+      run: sudo apt-get install -y libglib2.0-dev
+    - name: Build Server
       working-directory: ./wayland-osd-server
       run: cargo build --verbose
