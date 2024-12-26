@@ -5,7 +5,6 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
-  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,7 +21,7 @@ jobs:
       working-directory: ./wayland-osd-client
       run: cargo build --verbose
     - name: Install dependencies for Server
-      run: sudo apt-get install -y libglib2.0-dev
+      run: sudo apt-get install -y libglib2.0-dev libpango1.0-dev
     - name: Build Server
       working-directory: ./wayland-osd-server
       run: cargo build --verbose
